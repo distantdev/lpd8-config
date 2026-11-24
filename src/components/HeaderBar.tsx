@@ -307,8 +307,8 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
                     type="button"
                     className="menu-item"
                     onClick={() => {
-                      closeFiles();
                       fileInputRef.current?.click();
+                      closeFiles();
                     }}
                   >
                     <span className="menu-item__title">

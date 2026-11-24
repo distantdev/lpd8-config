@@ -70,6 +70,8 @@ export function App() {
   const [selectedPads, setSelectedPads] = useState<number[]>([]);
   const [selectedKnobs, setSelectedKnobs] = useState<number[]>([]);
   const [flashSelection, setFlashSelection] = useState<ProgramNumber[]>([1]);
+  const [hasCustomFlashSelection, setHasCustomFlashSelection] = useState(false);
+  const [statusNotice, setStatusNotice] = useState<string | null>(null);
   const [verifyReadback, setVerifyReadback] = useState(true);
 
   const [previewResult, setPreviewResult] = useState<PatternPreviewResult | null>(null);
@@ -203,6 +205,31 @@ export function App() {
     return map;
   }, [previewResult, bank]);
 
+  const markEditedProgramsForFlash = useCallback(
+    (edited: ProgramNumber[], replaceAll = false) => {
+      const cleanEdited = Array.from(new Set(edited)).sort((a, b) => a - b);
+      if (cleanEdited.length === 0) return;
+
+      if (replaceAll) {
+        setFlashSelection(cleanEdited);
+        setHasCustomFlashSelection(false);
+        return;
+      }
+
+      if (hasCustomFlashSelection) return;
+
+      setFlashSelection((prev) => {
+        const kept = prev.filter((p) => {
+          const snap = hardwareSnapshot[p];
+          return !snap || !programsEqual(bank[p], snap);
+        });
+        const merged = Array.from(new Set([...kept, ...cleanEdited])).sort((a, b) => a - b);
+        return merged.length > 0 ? merged : cleanEdited;
+      });
+    },
+    [hasCustomFlashSelection, hardwareSnapshot, bank],
+  );
+
   const updateProgram = useCallback(
     (progNum: ProgramNumber, updater: (prev: ProgramConfig) => ProgramConfig) => {
       setBank((prev) => {
@@ -210,8 +237,9 @@ export function App() {
         next[progNum] = updater(cloneProgram(prev[progNum]));
         return next;
       });
+      markEditedProgramsForFlash([progNum], false);
     },
-    [setBank],
+    [setBank, markEditedProgramsForFlash],
   );
 
   const handleChangeChannel = useCallback(
@@ -248,20 +276,29 @@ export function App() {
       trail: DragFillCell[],
       copyOnly: boolean,
     ) => {
-      setBank((prev) => {
-        const res = computeDragFill(prev, { target, anchor, trail, copyOnly });
-        return res.changes.length > 0 ? res.nextBank : prev;
-      });
+      const res = computeDragFill(bank, { target, anchor, trail, copyOnly });
+      if (res.changes.length === 0) return;
+      setBank(res.nextBank);
+      const changedPrograms = Array.from(
+        new Set(res.changes.map((c) => c.program)),
+      ) as ProgramNumber[];
+      markEditedProgramsForFlash(changedPrograms, false);
     },
-    [setBank],
+    [bank, setBank, markEditedProgramsForFlash],
   );
 
   const handleApplyPattern = useCallback(
     (result: PatternPreviewResult) => {
       setBank(result.nextBank);
       setLastFlashResults(null);
+      const changedPrograms = Array.from(
+        new Set(result.changes.map((c) => c.program)),
+      ) as ProgramNumber[];
+      if (changedPrograms.length > 0) {
+        markEditedProgramsForFlash(changedPrograms, true);
+      }
     },
-    [setBank],
+    [setBank, markEditedProgramsForFlash],
   );
 
   const handleCopyProgram = useCallback(
@@ -271,8 +308,9 @@ export function App() {
         next[to] = { ...cloneProgram(prev[from]), program: to };
         return next;
       });
+      markEditedProgramsForFlash([to], false);
     },
-    [setBank],
+    [setBank, markEditedProgramsForFlash],
   );
 
   const handleSwapPrograms = useCallback(
@@ -285,11 +323,13 @@ export function App() {
         next[b] = progA;
         return next;
       });
+      markEditedProgramsForFlash([a, b], false);
     },
-    [setBank],
+    [setBank, markEditedProgramsForFlash],
   );
 
   const handleToggleFlashProgram = useCallback((prog: ProgramNumber) => {
+    setHasCustomFlashSelection(true);
     setFlashSelection((prev) =>
       prev.includes(prog)
         ? prev.filter((p) => p !== prog)
@@ -299,6 +339,7 @@ export function App() {
 
   const handleSetFlashPreset = useCallback(
     (preset: 'modified' | 'current' | 'all') => {
+      setHasCustomFlashSelection(true);
       if (preset === 'modified') {
         setFlashSelection(dirtyPrograms);
       } else if (preset === 'current') {
@@ -363,6 +404,8 @@ export function App() {
   const handlePullCurrent = async () => {
     const service = midiRef.current!;
     setErrorBanner(null);
+    setStatusNotice(null);
+    setHasCustomFlashSelection(false);
     setIsBusy(true);
     setProgressText(`Reading Program ${focusedProgram}…`);
     try {
@@ -388,6 +431,8 @@ export function App() {
   const handlePullAll = async () => {
     const service = midiRef.current!;
     setErrorBanner(null);
+    setStatusNotice(null);
+    setHasCustomFlashSelection(false);
     setIsBusy(true);
     try {
       const loaded = await service.pullPrograms([...PROGRAM_NUMBERS], (done, total, current) => {
@@ -411,6 +456,7 @@ export function App() {
         }
         return next;
       });
+      setFlashSelection([focusedProgram]);
       setLastFlashResults(null);
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Failed to read all programs.');
@@ -449,6 +495,7 @@ export function App() {
     if (flashSelection.length === 0) return;
     const service = midiRef.current!;
     setErrorBanner(null);
+    setStatusNotice(null);
     setIsBusy(true);
     setLastFlashResults(null);
 
@@ -456,6 +503,7 @@ export function App() {
     try {
       const results = await service.flashPrograms(targets, {
         verify: verifyReadback,
+        restoreActiveProgram: activeHardwareProgram,
         onProgress: (done, total, current, phase) => {
           if (done < total) {
             setProgressText(
@@ -477,6 +525,10 @@ export function App() {
         }
         return next;
       });
+      const activeAfter = await service.getActiveProgram().catch(() => null);
+      if (activeAfter) {
+        setActiveHardwareProgram(activeAfter);
+      }
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Send operation failed.');
     } finally {
@@ -521,10 +573,18 @@ export function App() {
         const text = await file.text();
         const imported = importBankJson(text);
         setBank(imported);
+        markEditedProgramsForFlash([1, 2, 3, 4], true);
+        setStatusNotice(
+          `Loaded ${file.name} (P1–P4) into editor — click Send 4 Slots to write to LPD8.`,
+        );
       } else {
         const buffer = new Uint8Array(await file.arrayBuffer());
-        const { nextBank } = importSyxIntoBank(bank, buffer, focusedProgram);
+        const { nextBank, importedPrograms } = importSyxIntoBank(bank, buffer, focusedProgram);
         setBank(nextBank);
+        markEditedProgramsForFlash(importedPrograms, true);
+        setStatusNotice(
+          `Loaded ${file.name} (${importedPrograms.map((p) => `P${p}`).join(', ')}) into editor — click Send to write to LPD8.`,
+        );
       }
       setLastFlashResults(null);
     } catch (err) {
@@ -571,6 +631,8 @@ export function App() {
         onResetFactory={() => {
           setBank(createFactoryBank());
           setLastFlashResults(null);
+          markEditedProgramsForFlash([1, 2, 3, 4], true);
+          setStatusNotice('Restored factory defaults locally — click Send 4 Slots to write to LPD8.');
         }}
       />
 
@@ -750,6 +812,7 @@ export function App() {
         dirtyPrograms={dirtyPrograms}
         verifyReadback={verifyReadback}
         progressText={progressText}
+        statusNotice={statusNotice}
         lastFlashResults={lastFlashResults}
         onConnectHardware={handleConnectHardware}
         onPullCurrent={handlePullCurrent}
@@ -760,6 +823,7 @@ export function App() {
         onToggleVerify={setVerifyReadback}
         onFlashSelected={handleFlashSelected}
         onDismissResults={() => setLastFlashResults(null)}
+        onDismissNotice={() => setStatusNotice(null)}
       />
     </div>
   );

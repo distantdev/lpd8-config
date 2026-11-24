@@ -12,6 +12,7 @@ interface FlashPanelProps {
   dirtyPrograms: ProgramNumber[];
   verifyReadback: boolean;
   progressText: string | null;
+  statusNotice?: string | null;
   lastFlashResults: FlashResult[] | null;
   onConnectHardware: () => void;
   onPullCurrent: () => void;
@@ -22,6 +23,7 @@ interface FlashPanelProps {
   onToggleVerify: (verify: boolean) => void;
   onFlashSelected: () => void;
   onDismissResults: () => void;
+  onDismissNotice?: () => void;
 }
 
 export const FlashPanel: React.FC<FlashPanelProps> = ({
@@ -33,6 +35,7 @@ export const FlashPanel: React.FC<FlashPanelProps> = ({
   dirtyPrograms,
   verifyReadback,
   progressText,
+  statusNotice,
   lastFlashResults,
   onConnectHardware,
   onPullCurrent,
@@ -43,6 +46,7 @@ export const FlashPanel: React.FC<FlashPanelProps> = ({
   onToggleVerify,
   onFlashSelected,
   onDismissResults,
+  onDismissNotice,
 }) => {
   const [readOpen, setReadOpen] = useState(false);
   const [slotsOpen, setSlotsOpen] = useState(false);
@@ -65,7 +69,26 @@ export const FlashPanel: React.FC<FlashPanelProps> = ({
       );
     }
 
-    if (!lastFlashResults || lastFlashResults.length === 0) return null;
+    if (!lastFlashResults || lastFlashResults.length === 0) {
+      if (!statusNotice) return null;
+      return (
+        <div className="sync-toast-wrap">
+          <div className="sync-toast sync-toast--busy" role="status">
+            <span>{statusNotice}</span>
+            {onDismissNotice && (
+              <button
+                type="button"
+                style={{ background: 'none', border: 'none', color: 'inherit', padding: '0 4px' }}
+                aria-label="Dismiss notice"
+                onClick={onDismissNotice}
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        </div>
+      );
+    }
     const allOk = lastFlashResults.every((r) => r.written && r.verified !== false);
     if (allOk) {
       const list = lastFlashResults.map((r) => `P${r.program}`).join(', ');
@@ -91,10 +114,13 @@ export const FlashPanel: React.FC<FlashPanelProps> = ({
       .filter((r) => !r.written || r.verified === false)
       .map((r) => `P${r.program}`)
       .join(', ');
+    const firstErr = lastFlashResults.find((r) => r.error)?.error;
     return (
       <div className="sync-toast-wrap">
         <div className="sync-toast sync-toast--err" role="alert">
-          <span>Could not verify {failed}</span>
+          <span>
+            {firstErr ? `Failed on ${failed}: ${firstErr}` : `Could not verify ${failed}`}
+          </span>
           <button
             type="button"
             style={{ background: 'none', border: 'none', color: 'inherit', padding: '0 4px' }}

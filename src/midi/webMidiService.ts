@@ -53,6 +53,7 @@ export class WebMidiService {
   private mode: ConnectionMode = 'disconnected';
   private listeners: MidiServiceListeners = {};
   private waiters: PendingWaiter<unknown>[] = [];
+  private sysexBuffer: number[] | null = null;
   private queue: Promise<unknown> = Promise.resolve();
   private logIdCounter = 1;
 
@@ -171,10 +172,17 @@ export class WebMidiService {
             this.handleIncomingBytes(event.data);
           }
         };
+        if (typeof input.open === 'function' && input.connection !== 'open') {
+          void input.open().catch(() => undefined);
+        }
       }
     }
     if (outputId) {
-      this.selectedOutput = this.midiAccess.outputs.get(outputId) ?? null;
+      const output = this.midiAccess.outputs.get(outputId) ?? null;
+      this.selectedOutput = output;
+      if (output && typeof output.open === 'function' && output.connection !== 'open') {
+        void output.open().catch(() => undefined);
+      }
     }
 
     if (this.selectedInput && this.selectedOutput) {
@@ -201,8 +209,16 @@ export class WebMidiService {
     if (!matchedIn && this.midiAccess.inputs.size === 1) {
       matchedIn = this.midiAccess.inputs.values().next().value ?? null;
     }
-    if (!matchedOut && this.midiAccess.outputs.size === 1) {
-      matchedOut = this.midiAccess.outputs.values().next().value ?? null;
+    if (!matchedOut) {
+      const nonSynthOutputs: MIDIOutput[] = [];
+      this.midiAccess.outputs.forEach((output) => {
+        if (!/microsoft gs wavetable/i.test(output.name || '')) {
+          nonSynthOutputs.push(output);
+        }
+      });
+      if (nonSynthOutputs.length === 1) {
+        matchedOut = nonSynthOutputs[0];
+      }
     }
 
     const inId = matchedIn ? (matchedIn as MIDIInput).id : null;
@@ -215,6 +231,7 @@ export class WebMidiService {
     if (this.selectedInput) {
       this.selectedInput.onmidimessage = null;
     }
+    this.sysexBuffer = null;
     this.selectedInput = null;
     this.selectedOutput = null;
   }
@@ -226,6 +243,32 @@ export class WebMidiService {
       () => undefined,
     );
     return next;
+  }
+
+  private async ensurePortsOpen(): Promise<void> {
+    if (this.mode === 'disconnected') {
+      throw new Error('No MIDI device connected. Connect your LPD8 first.');
+    }
+    if (!this.selectedInput || !this.selectedOutput) {
+      throw new Error('Both MIDI Input and MIDI Output ports must be selected.');
+    }
+    if (this.selectedInput.state !== 'connected' || this.selectedOutput.state !== 'connected') {
+      throw new Error('LPD8 MIDI port is disconnected. Check the USB cable and reconnect.');
+    }
+
+    try {
+      if (typeof this.selectedInput.open === 'function' && this.selectedInput.connection !== 'open') {
+        await this.selectedInput.open();
+      }
+      if (typeof this.selectedOutput.open === 'function' && this.selectedOutput.connection !== 'open') {
+        await this.selectedOutput.open();
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `Could not open LPD8 MIDI port (another app or DAW on Windows may be locking it): ${detail}`,
+      );
+    }
   }
 
   private sendRaw(bytes: Uint8Array, label: string): void {
@@ -241,13 +284,24 @@ export class WebMidiService {
     this.selectedOutput.send(bytes);
   }
 
-  private waitForReply<T>(
-    match: (bytes: Uint8Array) => T | null,
+  private async sendRawAsync(bytes: Uint8Array, label: string): Promise<void> {
+    await this.ensurePortsOpen();
+    this.sendRaw(bytes, label);
+  }
+
+  private async sendAndWait<T>(
+    bytes: Uint8Array,
+    label: string,
+    match: (rx: Uint8Array) => T | null,
     timeoutMs: number,
     timeoutLabel: string,
   ): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
+    await this.ensurePortsOpen();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let waiterRef: PendingWaiter<unknown> | null = null;
+
+    const waitPromise = new Promise<T>((resolve, reject) => {
+      timer = setTimeout(() => {
         this.waiters = this.waiters.filter((w) => w !== waiter);
         reject(new Error(timeoutLabel));
       }, timeoutMs);
@@ -255,32 +309,77 @@ export class WebMidiService {
       const waiter: PendingWaiter<T> = {
         match,
         resolve: (value: T) => {
-          clearTimeout(timer);
+          if (timer) clearTimeout(timer);
           resolve(value);
         },
         reject: (err: Error) => {
-          clearTimeout(timer);
+          if (timer) clearTimeout(timer);
           reject(err);
         },
         timer,
       };
-      this.waiters.push(waiter as PendingWaiter<unknown>);
+      waiterRef = waiter as PendingWaiter<unknown>;
+      this.waiters.push(waiterRef);
     });
+
+    try {
+      await this.sendRawAsync(bytes, label);
+    } catch (err) {
+      if (timer) clearTimeout(timer);
+      if (waiterRef) {
+        this.waiters = this.waiters.filter((w) => w !== waiterRef);
+      }
+      throw err;
+    }
+
+    return waitPromise;
+  }
+
+  private dispatchCompleteSysex(raw: Uint8Array): void {
+    this.emitLog('rx', this.labelIncomingSysex(raw), Array.from(raw));
+    for (let i = 0; i < this.waiters.length; i++) {
+      const waiter = this.waiters[i];
+      const parsed = waiter.match(raw);
+      if (parsed !== null) {
+        this.waiters.splice(i, 1);
+        waiter.resolve(parsed);
+        return;
+      }
+    }
   }
 
   private handleIncomingBytes(raw: Uint8Array): void {
     if (raw.length === 0) return;
 
     if (raw[0] === SYSEX_START && raw[raw.length - 1] === SYSEX_END) {
-      this.emitLog('rx', this.labelIncomingSysex(raw), Array.from(raw));
-      for (let i = 0; i < this.waiters.length; i++) {
-        const waiter = this.waiters[i];
-        const parsed = waiter.match(raw);
-        if (parsed !== null) {
-          this.waiters.splice(i, 1);
-          waiter.resolve(parsed);
+      this.sysexBuffer = null;
+      this.dispatchCompleteSysex(raw);
+      return;
+    }
+
+    if (raw[0] === SYSEX_START) {
+      this.sysexBuffer = Array.from(raw);
+      return;
+    }
+
+    if (this.sysexBuffer !== null) {
+      for (let i = 0; i < raw.length; i++) {
+        const byte = raw[i];
+        if (byte >= 0xF8) {
+          continue;
+        }
+        if (byte === SYSEX_END) {
+          this.sysexBuffer.push(SYSEX_END);
+          const assembled = new Uint8Array(this.sysexBuffer);
+          this.sysexBuffer = null;
+          this.dispatchCompleteSysex(assembled);
           return;
         }
+        if (byte >= 0x80) {
+          this.sysexBuffer = null;
+          break;
+        }
+        this.sysexBuffer.push(byte);
       }
       return;
     }
@@ -361,16 +460,43 @@ export class WebMidiService {
     });
   }
 
+  private describeFirstProgramDiff(expected: ProgramConfig, actual: ProgramConfig): string {
+    if (expected.program !== actual.program) {
+      return `program slot expected P${expected.program}, got P${actual.program}`;
+    }
+    if (expected.channel !== actual.channel) {
+      return `channel expected ${expected.channel}, got ${actual.channel}`;
+    }
+    for (let i = 0; i < 8; i++) {
+      const ep = expected.pads[i];
+      const ap = actual.pads[i];
+      if (!ep || !ap) return `Pad ${i + 1} missing`;
+      if (ep.note !== ap.note) return `Pad ${ep.number} Note expected ${ep.note}, got ${ap.note}`;
+      if (ep.pc !== ap.pc) return `Pad ${ep.number} PC expected ${ep.pc}, got ${ap.pc}`;
+      if (ep.cc !== ap.cc) return `Pad ${ep.number} CC expected ${ep.cc}, got ${ap.cc}`;
+      if (ep.mode !== ap.mode) return `Pad ${ep.number} Mode expected ${ep.mode}, got ${ap.mode}`;
+    }
+    for (let i = 0; i < 8; i++) {
+      const ek = expected.knobs[i];
+      const ak = actual.knobs[i];
+      if (!ek || !ak) return `Knob ${i + 1} missing`;
+      if (ek.cc !== ak.cc) return `Knob ${ek.number} CC expected ${ek.cc}, got ${ak.cc}`;
+      if (ek.min !== ak.min) return `Knob ${ek.number} Min expected ${ek.min}, got ${ak.min}`;
+      if (ek.max !== ak.max) return `Knob ${ek.number} Max expected ${ek.max}, got ${ak.max}`;
+    }
+    return 'unknown field mismatch';
+  }
+
   queryIdentity(): Promise<DeviceIdentity | null> {
     return this.enqueue(async () => {
       try {
-        const waitPromise = this.waitForReply(
+        return await this.sendAndWait(
+          encodeIdentityRequest(),
+          'Query Device Identity',
           (bytes) => decodeIdentityResponse(bytes),
           600,
           'Device identity timeout',
         );
-        this.sendRaw(encodeIdentityRequest(), 'Query Device Identity');
-        return await waitPromise;
       } catch {
         return null;
       }
@@ -378,20 +504,20 @@ export class WebMidiService {
   }
 
   getActiveProgram(): Promise<ProgramNumber> {
-    return this.enqueue(async () => {
-      const waitPromise = this.waitForReply(
+    return this.enqueue(() =>
+      this.sendAndWait(
+        encodeGetActiveProgram(),
+        'Get Active Program',
         (bytes) => decodeActiveProgramResponse(bytes),
         1200,
         'Timed out waiting for Active Program response',
-      );
-      this.sendRaw(encodeGetActiveProgram(), 'Get Active Program');
-      return await waitPromise;
-    });
+      ),
+    );
   }
 
   activateProgram(program: ProgramNumber): Promise<void> {
     return this.enqueue(async () => {
-      this.sendRaw(encodeActivateProgram(program), `Activate Program ${program}`);
+      await this.sendRawAsync(encodeActivateProgram(program), `Activate Program ${program}`);
       await delay(25);
     });
   }
@@ -401,21 +527,28 @@ export class WebMidiService {
   }
 
   private async pullProgramInternal(program: ProgramNumber): Promise<ProgramConfig> {
-    const attempt = async (): Promise<ProgramConfig> => {
-      const waitPromise = this.waitForReply((bytes) => {
-        const decoded = decodeProgramResponse(bytes);
-        if (decoded && decoded.program === program) {
-          return decoded;
-        }
-        return null;
-      }, 1500, `Timed out reading Program ${program} from LPD8`);
-      this.sendRaw(encodeRequestProgram(program), `Request Program ${program}`);
-      return await waitPromise;
-    };
+    const attempt = (): Promise<ProgramConfig> =>
+      this.sendAndWait(
+        encodeRequestProgram(program),
+        `Request Program ${program}`,
+        (bytes) => {
+          const decoded = decodeProgramResponse(bytes);
+          if (decoded && decoded.program === program) {
+            return decoded;
+          }
+          return null;
+        },
+        1500,
+        `Timed out reading Program ${program} from LPD8`,
+      );
 
     try {
       return await attempt();
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '';
+      if (msg.includes('MIDI port') || msg.includes('No MIDI')) {
+        throw err;
+      }
       this.emitLog('info', `Retrying Program ${program} dump request...`);
       await delay(60);
       return await attempt();
@@ -444,6 +577,7 @@ export class WebMidiService {
     opts: {
       delayMs?: number;
       verify?: boolean;
+      restoreActiveProgram?: ProgramNumber | null;
       onProgress?: (done: number, total: number, current: ProgramNumber, phase: 'writing' | 'verifying') => void;
     } = {},
   ): Promise<FlashResult[]> {
@@ -457,7 +591,7 @@ export class WebMidiService {
         opts.onProgress?.(i, programs.length, config.program, 'writing');
         try {
           const packet = encodeWriteProgram(config);
-          this.sendRaw(packet, `Flash Program ${config.program} (66B)`);
+          await this.sendRawAsync(packet, `Flash Program ${config.program} (66B)`);
           await delay(delayMs);
 
           let verified: boolean | null = null;
@@ -467,7 +601,10 @@ export class WebMidiService {
             const expected = decodeProgramResponse(packet)!;
             verified = programsEqual(expected, readBack);
             if (!verified) {
-              this.emitLog('error', `Verify mismatch on Program ${config.program}`);
+              this.emitLog(
+                'error',
+                `Verify mismatch on Program ${config.program}: ${this.describeFirstProgramDiff(expected, readBack)}`,
+              );
             }
           }
 
@@ -487,6 +624,22 @@ export class WebMidiService {
           });
         }
       }
+
+      const wroteAny = results.some((r) => r.written);
+      if (wroteAny && opts.restoreActiveProgram) {
+        try {
+          await delay(50);
+          await this.sendRawAsync(
+            encodeActivateProgram(opts.restoreActiveProgram),
+            `Activate Program ${opts.restoreActiveProgram}`,
+          );
+          await delay(40);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'Unknown MIDI error';
+          this.emitLog('error', `Could not restore active Program ${opts.restoreActiveProgram}: ${msg}`);
+        }
+      }
+
       if (programs.length > 0) {
         opts.onProgress?.(
           programs.length,
