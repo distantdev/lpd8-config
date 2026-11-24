@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <radialGradient id="nebula" cx="28%" cy="22%" r="78%">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.28" />
+      <stop offset="52%" stop-color="#6366f1" stop-opacity="0.16" />
+      <stop offset="100%" stop-color="#12141a" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="ledGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ff6b68" />
+      <stop offset="100%" stop-color="#e53935" />
+    </radialGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#12141a" stroke="rgba(255,255,255,0.16)" stroke-width="2" />
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#nebula)" />
+  <!-- 2x2 Pad / Constellation Grid -->
+  <rect x="13" y="13" width="16" height="16" rx="4" fill="#1d212a" stroke="rgba(255,255,255,0.18)" stroke-width="1.5" />
+  <rect x="35" y="13" width="16" height="16" rx="4" fill="#1d212a" stroke="#22d3ee" stroke-opacity="0.65" stroke-width="1.5" />
+  <rect x="13" y="35" width="16" height="16" rx="4" fill="#1d212a" stroke="#e53935" stroke-width="1.75" />
+  <rect x="35" y="35" width="16" height="16" rx="4" fill="#1d212a" stroke="rgba(255,255,255,0.18)" stroke-width="1.5" />
+  <circle cx="21" cy="43" r="4" fill="url(#ledGlow)" />
+  <circle cx="43" cy="21" r="2.2" fill="#22d3ee" />
+</svg>
