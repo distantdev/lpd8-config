@@ -724,6 +724,14 @@ export function App() {
           </a>
           <span aria-hidden="true">·</span>
           <a
+            href="https://github.com/distantdev/lpd8-config"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            GitHub
+          </a>
+          <span aria-hidden="true">·</span>
+          <a
             href="https://distantnebula.com"
             target="_blank"
             rel="noopener noreferrer"

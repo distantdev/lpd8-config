@@ -98,7 +98,7 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
               <rect x="13.5" y="13.5" width="6" height="6" rx="1.5" fill="#232836" />
             </svg>
             <div className="brand__text">
-              <h1 className="brand__title">LPD8 Mapper</h1>
+              <h1 className="brand__title">LPD8 Config</h1>
               <a
                 className="brand__sub"
                 href="https://distantnebula.com"

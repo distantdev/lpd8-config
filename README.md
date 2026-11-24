@@ -1,4 +1,4 @@
-# LPD8 Mapper
+# LPD8 Config
 
 Browser-based editor for configuring the four program slots on the original first-edition LPD8 USB MIDI controller (Mk1, model ID `0x75`). Hosted at [https://lpd8.distantnebula.com](https://lpd8.distantnebula.com).
 
@@ -84,9 +84,11 @@ At the bottom of the page, **Diagnostics & SysEx Inspector** expands to show any
 
 ## Building from source
 
-Requires Node.js 18 or newer.
+Source is hosted at [github.com/distantdev/lpd8-config](https://github.com/distantdev/lpd8-config). Requires Node.js 18 or newer.
 
 ```bash
+git clone https://github.com/distantdev/lpd8-config.git
+cd lpd8-config
 npm install
 npm run dev
 ```
